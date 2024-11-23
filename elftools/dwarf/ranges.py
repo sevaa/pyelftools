@@ -51,10 +51,10 @@ class RangeListsPair(object):
         section = self._rnglists if cu.header.version >= 5 else self._ranges
         return section.get_range_list_at_offset(offset, cu)
 
-    def get_range_list_at_offset_ex(self, offset):
+    def get_range_list_at_offset_ex(self, offset, cu=None):
         """Gets an untranslated v5 rangelist from the v5 section.
         """
-        return self._rnglists.get_range_list_at_offset_ex(offset)
+        return self._rnglists.get_range_list_at_offset_ex(offset, cu)
 
     def iter_range_lists(self):
         """Tricky proposition, since the structure of ranges and rnglists
@@ -107,15 +107,23 @@ class RangeLists(object):
 
             The cu argument is necessary if the ranges section is a
             DWARFv5 debug_rnglists one, and the target rangelist
-            contains indirect encodings
+            contains indirect encodings.
+            Also, the cu argument is necessary in mixed bitness binaries,
+            such as PlayStation 3 ones.
         """
+        if cu:
+            self.structs = cu.structs
+            self._max_addr = 2 ** (self.structs.address_size * 8) - 1
         self.stream.seek(offset, os.SEEK_SET)
         return self._parse_range_list_from_stream(cu)
 
-    def get_range_list_at_offset_ex(self, offset):
+    def get_range_list_at_offset_ex(self, offset, cu=None):
         """Get a DWARF v5 range list, addresses and offsets unresolved,
         at the given offset in the section
         """
+        if cu:
+            self.structs = cu.structs
+            self._max_addr = 2 ** (self.structs.address_size * 8) - 1
         return struct_parse(self.structs.Dwarf_rnglists_entries, self.stream, offset)
 
     def iter_range_lists(self):

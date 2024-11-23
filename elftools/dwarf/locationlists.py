@@ -89,11 +89,15 @@ class LocationLists(object):
 
     def get_location_list_at_offset(self, offset, die=None):
         """ Get a location list at the given offset in the section.
-        Passing the die is only neccessary in DWARF5+, for decoding
+        Passing the die is neccessary in DWARF5+, for decoding
         location entry encodings that contain references to other sections.
+        Also passing the die is necessary in mixed bitness binaries, such as PlayStation 3 ones.
         """
         if self.version >= 5 and die is None:
-            raise DWARFError("For this binary, \"die\" needs to be provided")              
+            raise DWARFError("For this binary, \"die\" needs to be provided")
+        if die:
+            self.structs = die.cu.structs
+            self._max_addr = 2 ** (self.structs.address_size * 8) - 1
         self.stream.seek(offset, os.SEEK_SET)
         return self._parse_location_list_from_stream_v5(die.cu) if self.version >= 5 else self._parse_location_list_from_stream()
 
