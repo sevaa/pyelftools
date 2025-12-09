@@ -9,7 +9,7 @@
 import copy, os
 from collections import namedtuple
 from ..common.utils import (
-    struct_parse, dwarf_assert, preserve_stream_pos, iterbytes)
+    struct_parse, dwarf_assert, preserve_stream_pos, iterbytes, to_bytes)
 from ..construct import Struct, Switch
 from .enums import DW_EH_encoding_flags
 from .structs import DWARFStructs
@@ -330,7 +330,7 @@ class CallFrameInfo(object):
             Struct('Dummy_Augmentation_Data',
                    entry_structs.Dwarf_uleb128('length')),
             self.stream)['length']
-        return self.stream.read(augmentation_data_length)
+        return to_bytes(self.stream.read(augmentation_data_length))
 
     def _parse_lsda_pointer(self, structs, stream_offset, encoding):
         """ Parse bytes to get an LSDA pointer.

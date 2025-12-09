@@ -11,9 +11,10 @@ from io import BytesIO
 import os
 import struct
 import zlib
+from mmap import ACCESS_READ, mmap, ALLOCATIONGRANULARITY
 
 from ..common.exceptions import ELFError, ELFParseError
-from ..common.utils import struct_parse, elf_assert
+from ..common.utils import DebugSectionStream, struct_parse, elf_assert
 from .structs import ELFStructs
 from .sections import (
         Section, StringTableSection, SymbolTableSection,
@@ -30,6 +31,15 @@ from ..dwarf.dwarfinfo import DWARFInfo, DebugSectionDescriptor, DwarfConfig
 from ..ehabi.ehabiinfo import EHABIInfo
 from .hash import ELFHashSection, GNUHashSection
 from .constants import SHN_INDICES
+
+debug_section_names = ('.debug_info', '.debug_aranges', '.debug_abbrev',
+                        '.debug_str', '.debug_line', '.debug_frame',
+                        '.debug_loc', '.debug_ranges', '.debug_pubtypes',
+                        '.debug_pubnames', '.debug_addr',
+                        '.debug_str_offsets', '.debug_line_str',
+                        '.debug_loclists', '.debug_rnglists',
+                        '.debug_sup', '.gnu_debugaltlink', '.gnu_debuglink')
+# Also .eh_frame with slightly different rules
 
 class ELFFile(object):
     """ Creation: the constructor accepts a stream (file-like object) with the
@@ -87,6 +97,7 @@ class ELFFile(object):
             self._get_section_header_stringtable()
         self._section_name_map = None
         self.stream_loader = stream_loader
+        self.mapping = None
 
     @classmethod
     def load_from_path(cls, path):
@@ -239,8 +250,26 @@ class ELFFile(object):
         return bool(self.get_section_by_name('.debug_info') or
             self.get_section_by_name('.zdebug_info') or
             self.get_section_by_name('.eh_frame'))
+    
+    def supports_memmapped_dwarf_info(self, with_relocation=True):
+        """ Returns True is there are no transforms to debug sections
+            Returns None if there is no DWARF (other than maybe eh_frame) info in the binary
+        """
+        if self.get_section_index('.zdebug_info') is None and self.get_section_index('.debug_info') is None:
+            return None
+        
+        reloc_handler = RelocationHandler(self)
+       
+        def section_supports_mapping(name):
+            # TODO: there is a case of relocation section that does nothing
+            section = self.get_section_by_name(name)
+            return not section or (not section.compressed and (not with_relocation or reloc_handler.find_relocations_for_section(section) is None))
+        
+        return (not self.has_phantom_bytes() and
+                self.get_section_index('.zdebug_info') is None and
+                all(section_supports_mapping(sec_name) for sec_name in debug_section_names))
 
-    def get_dwarf_info(self, relocate_dwarf_sections=True, follow_links=True):
+    def get_dwarf_info(self, relocate_dwarf_sections=True, follow_links=True, memmapped=False):
         """ Return a DWARFInfo object representing the debugging information in
             this file.
 
@@ -254,16 +283,12 @@ class ELFFile(object):
         # present.
         # Sections that aren't found will be passed as None to DWARFInfo.
 
-        section_names = ('.debug_info', '.debug_aranges', '.debug_abbrev',
-                         '.debug_str', '.debug_line', '.debug_frame',
-                         '.debug_loc', '.debug_ranges', '.debug_pubtypes',
-                         '.debug_pubnames', '.debug_addr',
-                         '.debug_str_offsets', '.debug_line_str',
-                         '.debug_loclists', '.debug_rnglists',
-                         '.debug_sup', '.gnu_debugaltlink', '.gnu_debuglink')
+        section_names = debug_section_names
 
         compressed = bool(self.get_section_by_name('.zdebug_info'))
         if compressed:
+            if memmapped:
+                raise ELFParseError("This binary has compressed debug sections, memory mapped mode is not supported.")
             section_names = tuple(map(lambda x: '.z' + x[1:], section_names))
 
         # As it is loaded in the process image, .eh_frame cannot be compressed
@@ -275,6 +300,32 @@ class ELFFile(object):
          debug_pubnames_name, debug_addr_name, debug_str_offsets_name,
          debug_line_str_name, debug_loclists_sec_name, debug_rnglists_sec_name,
          debug_sup_name, gnu_debugaltlink_name, gnu_debuglink, eh_frame_sec_name) = section_names
+        
+        # TODO: section name is not unique in .o files
+
+        if memmapped:
+            if not hasattr(self.stream, 'fileno'):
+                raise ELFParseError("For memory mapped mode, the ELFFile should be constructed with a file stream.")
+            
+            if self.has_phantom_bytes():
+                raise ELFParseError("The DWARF information in this binary is not compatible with the memory mapped mode - it has phantom bytes.")
+
+            sections = (self.get_section_by_name(secname) for secname in section_names)
+            sections = tuple(sec for sec in sections if sec)
+            if any(sec.compressed for sec in sections):
+                raise ELFParseError("The DWARF information in this binary is not compatible with the memory mapped mode - it has compressed DWARF data.")
+            
+            # The check for relocations in DWARF sections is in _read_dwarf_section()
+
+            mapping_offset = min(sec.header.sh_offset for sec in sections)
+            mapping_offset &= ~(ALLOCATIONGRANULARITY-1)
+            
+            length = max(sec.header.sh_offset + sec.header.sh_size for sec in sections) - mapping_offset
+            self.mapping = mmap(self.stream.fileno(), length, access=ACCESS_READ, offset=mapping_offset)
+            mapping_view = memoryview(self.mapping)
+        else:
+            mapping_view = False
+            mapping_offset = False
 
         debug_sections = {}
         for secname in section_names:
@@ -284,7 +335,9 @@ class ELFFile(object):
             else:
                 dwarf_section = self._read_dwarf_section(
                     section,
-                    relocate_dwarf_sections)
+                    relocate_dwarf_sections,
+                    mapping_view,
+                    mapping_offset)
                 if compressed and secname.startswith('.z'):
                     dwarf_section = self._decompress_dwarf_section(dwarf_section)
                 debug_sections[secname] = dwarf_section
@@ -797,16 +850,12 @@ class ELFFile(object):
         """
         return struct_parse(self.structs.Elf_Ehdr, self.stream, stream_pos=0)
 
-    def _read_dwarf_section(self, section, relocate_dwarf_sections):
+    def _read_dwarf_section(self, section, relocate_dwarf_sections, mapping_view, mapping_offset):
         """ Read the contents of a DWARF section from the stream and return a
             DebugSectionDescriptor. Apply relocations if asked to.
         """
         phantom_bytes = self.has_phantom_bytes()
-        # The section data is read into a new stream, for processing
-        section_stream = BytesIO()
-        section_data = section.data()
-        section_stream.write(section_data[::2] if phantom_bytes else section_data)
-
+        reloc_section = False
         if relocate_dwarf_sections:
             reloc_handler = RelocationHandler(self)
             reloc_section = reloc_handler.find_relocations_for_section(section)
@@ -814,9 +863,21 @@ class ELFFile(object):
                 if phantom_bytes:
                     # No guidance how should the relocation work - before or after the odd byte skip
                     raise ELFParseError("This binary has relocations in the DWARF sections, currently not supported.")
-                else:
-                    reloc_handler.apply_section_relocations(
-                            section_stream, reloc_section)
+
+        # The section data is read into a new stream, for processing
+        if mapping_view:
+            if reloc_section: # Compression, phantom bytes are checked elsewhere
+                # TODO: there is a case of relocation section that does nothing
+                raise ELFParseError("This binary's debug information contains relocations, is not compatible with memory mapped mode.")
+            offset = section.header.sh_offset - mapping_offset
+            section_data = mapping_view[offset:offset + section.header.sh_size]
+            section_stream = DebugSectionStream(section_data, name=section.name)
+        else:
+            section_data = section.data()
+            section_stream = BytesIO(section_data[::2] if phantom_bytes else section_data)
+
+        if reloc_section:
+            reloc_handler.apply_section_relocations(section_stream, reloc_section)
 
         return DebugSectionDescriptor(
                 stream=section_stream,
@@ -879,3 +940,11 @@ class ELFFile(object):
         """
         # Vendor flag EF_PIC30_NO_PHANTOM_BYTE=0x80000000: clear means phantom bytes are present
         return self['e_machine'] == 'EM_DSPIC30F' and (self['e_flags'] & 0x80000000) == 0
+    
+    def __enter__(self):
+        return self.mapping
+
+    def __exit__(self, type, value, tb):
+        if self.mapping:
+            self.mapping.close()
+            self.mapping = None

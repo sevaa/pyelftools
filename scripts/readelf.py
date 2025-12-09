@@ -106,7 +106,7 @@ def _format_symbol_name(s):
 class ReadElf(object):
     """ display_* methods are used to emit output into the output stream
     """
-    def __init__(self, file, output):
+    def __init__(self, file, output, memmapped):
         """ file:
                 stream object with the ELF file to read
 
@@ -122,6 +122,7 @@ class ReadElf(object):
         self._versioninfo = None
 
         self._shndx_sections = None
+        self._memmapped = memmapped
 
     def display_file_header(self):
         """ Display the ELF file header
@@ -1113,7 +1114,7 @@ class ReadElf(object):
             return
 
         if self.elffile.has_dwarf_info():
-            self._dwarfinfo = self.elffile.get_dwarf_info()
+            self._dwarfinfo = self.elffile.get_dwarf_info(memmapped=self._memmapped)
         else:
             self._dwarfinfo = None
 
@@ -1871,6 +1872,9 @@ def main(stream=None):
                            action='store_true', dest='show_traceback',
                            help='Dump the Python traceback on ELFError'
                                 ' exceptions from elftools')
+    argparser.add_argument('--memmapped',
+                           action = 'store_true',
+                           help='Retrieve DWARF info in memory mapped mode')
 
     args = argparser.parse_args()
 
@@ -1887,7 +1891,7 @@ def main(stream=None):
 
     with open(args.file, 'rb') as file:
         try:
-            readelf = ReadElf(file, stream or sys.stdout)
+            readelf = ReadElf(file, stream or sys.stdout, args.memmapped)
             if do_file_header:
                 readelf.display_file_header()
             if do_section_header:

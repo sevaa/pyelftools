@@ -55,6 +55,9 @@ def parse_cstring_from_stream(stream, stream_pos=None):
         Note: a bytes object is returned here, because this is what's read from
         the binary file.
     """
+    if isinstance(stream, DebugSectionStream):
+        return stream.parse_cstring(stream_pos)
+    
     if stream_pos is not None:
         stream.seek(stream_pos)
     CHUNKSIZE = 64
@@ -135,6 +138,77 @@ def bytes2hex(b, sep=''):
     if not sep:
         return b.hex()
     return sep.join(map('{:02x}'.format, b))
+
+class DebugSectionStream:
+    """A drop-in replacement for a read only BytesIO with access
+    to the underlying buffer, with the least amount of memory copying.
+    read() on this returns slices of the underlying buffer; if that's a memoryview,
+    the slices will be memoryviews also.
+    """
+    __slots__ = ('buffer', 'pos', 'section_name')
+    def __init__(self, buf, name = None):
+        self.buffer = buf
+        self.pos = 0
+        self.section_name = name
+
+    def tell(self):
+        return self.pos
+    
+    def seek(self, offset, whence = os.SEEK_SET):
+        if whence == os.SEEK_SET:
+            self.pos = offset
+        elif whence == os.SEEK_CUR:
+            self.pos += offset
+        elif whence == os.SEEK_END:
+            self.pos = len(self.buffer) + offset
+        else:
+            raise ValueError()
+        
+    def read(self, length):
+        n = len(self.buffer)
+        pos = self.pos
+        if pos >= n:
+            r = b''
+            length = 0
+        else:
+            if pos + length > n:
+                length = n - pos
+            r = self.buffer[pos:pos + length]
+        self.pos = pos + length
+        return r
+    
+    def getbuffer(self):
+        """For compatibility with BytesIO
+        """
+        return self.buffer
+    
+    def getvalue(self):
+        """For compatibility with BytesIO
+        """
+        return self.buffer
+    
+    def parse_cstring(self, stream_pos=None):
+        """Helper for parse_cstring_from_stream
+        """
+        if stream_pos is not None:
+            self.pos = stream_pos
+        n = len(self.buffer)
+        if self.pos >= n:
+            return None
+        # No find() in memoryview
+        end_pos = next((i for i in range(self.pos, n) if self.buffer[i] == 0), None)
+        if end_pos is not None:
+            r = bytes(self.buffer[self.pos:end_pos])
+            self.pos = end_pos + 1
+        else:
+            r = None
+            self.pos = len(self.buffer)
+        return r
+    
+def to_bytes(b):
+    """Takes a buffer, wraps in bytes if it isn't one already
+    """
+    return b if isinstance(b, bytes) else bytes(b)
 
 #------------------------- PRIVATE -------------------------
 

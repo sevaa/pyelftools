@@ -51,7 +51,7 @@ def discover_testfiles(rootdir):
             yield os.path.join(rootdir, filename)
 
 
-def run_test_on_file(filename, verbose=False, opt=None):
+def run_test_on_file(filename, verbose=False, opt=None, memmapped=False):
     """ Runs a test on the given input filename. Return True if all test
         runs succeeded.
         If opt is specified, rather that going over the whole
@@ -105,8 +105,10 @@ def run_test_on_file(filename, verbose=False, opt=None):
         # stdouts will be a 2-element list: output of readelf and output
         # of scripts/readelf.py
         stdouts = []
-        for exe_path in [READELF_PATH, 'scripts/readelf.py']:
+        for (i, exe_path) in enumerate([READELF_PATH, 'scripts/readelf.py']):
             args = [option, filename]
+            if i and memmapped:
+                args += ['--memmapped']
             if verbose: testlog.info("....executing: '%s %s'" % (
                 exe_path, ' '.join(args)))
             t1 = time.time()
@@ -270,6 +272,9 @@ def main():
     argparser.add_argument('--opt',
         action='store', dest='opt', metavar='<readelf-option>',
         help= 'Limit the test one one readelf option.')
+    argparser.add_argument('--memmapped',
+        action='store_true', dest='memmapped',
+        help= 'Test readelf.py in memory mapped mode on a subset of files.')
     args = argparser.parse_args()
 
     if args.parallel:
@@ -286,6 +291,20 @@ def main():
     # are taken as inputs. Otherwise, autodiscovery is performed.
     if len(args.files) > 0:
         filenames = args.files
+    elif args.memmapped:
+        # Hand selected test files with no transforms in the DWARF sections
+        filenames = ('cuv5_x86-64_gcc.so.elf',
+            'dwarf_gnuops4.so.elf',
+            'dwarf_lineprogramv5.elf',
+            'dwarf_test_versions_mix.elf',
+            'dwarf_v4cie.elf',
+            'dwarf_v5ops.so.elf',
+            'exe_simple64.elf',
+            'libelf0_8_13_32bit.so.elf',
+            'lineprogram.elf',
+            'simple_armhf_gcc.o.elf',
+            'struct-bitfield-packed.elf')
+        filenames = tuple(os.path.join('test', 'testfiles_for_readelf', fn) for fn in filenames)
     else:
         filenames = sorted(discover_testfiles('test/testfiles_for_readelf'))
 
@@ -296,7 +315,7 @@ def main():
     else:
         failures = 0
         for filename in filenames:
-            if not run_test_on_file(filename, args.verbose, args.opt):
+            if not run_test_on_file(filename, args.verbose, args.opt, args.memmapped):
                 failures += 1
                 if not args.keep_going:
                     break
