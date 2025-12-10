@@ -29,7 +29,7 @@ class CompileUnit(object):
         To get the top-level DIE describing the compilation unit, call the
         get_top_DIE method.
     """
-    def __init__(self, header, dwarfinfo, structs, cu_offset, cu_die_offset):
+    def __init__(self, header, dwarfinfo, structs, cu_offset, cu_die_offset, enable_caching):
         """ header:
                 CU header for this compile unit
 
@@ -55,16 +55,20 @@ class CompileUnit(object):
         # requested.
         self._abbrev_table = None
 
-        # A list of DIEs belonging to this CU.
-        # This list is lazily constructed as DIEs are iterated over.
-        self._dielist = []
-        # A list of file offsets, corresponding (by index) to the DIEs
-        # in `self._dielist`. This list exists separately from
-        # `self._dielist` to make it binary searchable, enabling the
-        # DIE population strategy used in `iter_DIE_children`.
-        # Like `self._dielist`, this list is lazily constructed
-        # as DIEs are iterated over.
-        self._diemap = []
+        if enable_caching:
+            # A list of DIEs belonging to this CU.
+            # This list is lazily constructed as DIEs are iterated over.
+            self._dielist = []
+            # A list of file offsets, corresponding (by index) to the DIEs
+            # in `self._dielist`. This list exists separately from
+            # `self._dielist` to make it binary searchable, enabling the
+            # DIE population strategy used in `iter_DIE_children`.
+            # Like `self._dielist`, this list is lazily constructed
+            # as DIEs are iterated over.
+            self._diemap = []
+        else:
+            self._dielist = None
+            self._diemap = None
 
     def dwarf_format(self):
         """ Get the DWARF format (32 or 64) for this CU
@@ -86,7 +90,7 @@ class CompileUnit(object):
 
         # Note that a top DIE always has minimal offset and is therefore
         # at the beginning of our lists, so no bisect is required.
-        if len(self._diemap) > 0:
+        if self._diemap and len(self._diemap) > 0:
             return self._dielist[0]
 
         top = DIE(
@@ -94,8 +98,9 @@ class CompileUnit(object):
                 stream=self.dwarfinfo.debug_info_sec.stream,
                 offset=self.cu_die_offset)
 
-        self._dielist.insert(0, top)
-        self._diemap.insert(0, self.cu_die_offset)
+        if self._diemap:
+            self._dielist.insert(0, top)
+            self._diemap.insert(0, self.cu_die_offset)
 
         top._translate_indirect_attributes() # Can't translate indirect attributes until the top DIE has been parsed to the end
 
@@ -105,7 +110,7 @@ class CompileUnit(object):
         """ Returns whether the top DIE in this CU has already been parsed and cached.
             No parsing on demand!
         """
-        return len(self._diemap) > 0        
+        return self._diemap and len(self._diemap) > 0        
 
     @property
     def size(self):
@@ -226,20 +231,38 @@ class CompileUnit(object):
         # the top DIE and obtain a reference to its stream.
         top_die_stream = self.get_top_DIE().stream
 
-        # `offset` is the offset in the stream of the DIE we want to return.
-        # The map is maintined as a parallel array to the list.  We call
-        # bisect each time to ensure new DIEs are inserted in the correct
-        # order within both `self._dielist` and `self._diemap`.
-        i = bisect_right(self._diemap, offset)
+        die = None
+        if self._diemap:
+            # `offset` is the offset in the stream of the DIE we want to return.
+            # The map is maintined as a parallel array to the list.  We call
+            # bisect each time to ensure new DIEs are inserted in the correct
+            # order within both `self._dielist` and `self._diemap`.
 
-        # Note that `self._diemap` cannot be empty because a the top DIE
-        # was inserted by the call to .get_top_DIE().  Also it has the minimal
-        # offset, so the bisect_right insert point will always be at least 1.
-        if offset == self._diemap[i - 1]:
-            die = self._dielist[i - 1]
-        else:
+            i = bisect_right(self._diemap, offset)
+
+            # Note that `self._diemap` cannot be empty because a the top DIE
+            # was inserted by the call to .get_top_DIE().  Also it has the minimal
+            # offset, so the bisect_right insert point will always be at least 1.
+            if offset == self._diemap[i - 1]:
+                die = self._dielist[i - 1]
+
+        if die is None: # Caching disabled or cache miss
             die = DIE(cu=self, stream=top_die_stream, offset=offset)
-            self._dielist.insert(i, die)
-            self._diemap.insert(i, offset)
+            if self._diemap:
+                self._dielist.insert(i, die)
+                self._diemap.insert(i, offset)
 
         return die
+    
+    def disable_caching(self):
+        if self._dielist:
+            for die in self._dielist:
+                if die._parent:
+                    die._parent = die._parent.offset
+            self._dielist = None
+            self._diemap = None
+
+    @property
+    def caching_enabled(self):
+        return self._diemap is not None
+

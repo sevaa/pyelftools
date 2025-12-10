@@ -135,6 +135,7 @@ class DWARFInfo(object):
         # Access with .iter_CUs(), .get_CU_containing(), and/or .get_CU_at().
         self._cu_cache = []
         self._cu_offsets_map = []
+        self._no_cache = False
 
     @property
     def has_debug_info(self):
@@ -432,7 +433,7 @@ class DWARFInfo(object):
 
             See get_CU_at().
         """
-        # Find the insert point for the requested offset.  With bisect_right,
+        # Find the insert point for the requested offset. With bisect_right,
         # if this entry is present in the cache it will be the prior entry.
         i = bisect_right(self._cu_offsets_map, offset)
         if i >= 1 and offset == self._cu_offsets_map[i - 1]:
@@ -443,8 +444,9 @@ class DWARFInfo(object):
         # bisect_right search while the parallel indexed ._cu_cache[] holds
         # the object references.
         cu = self._parse_CU_at_offset(offset)
-        self._cu_offsets_map.insert(i, offset)
-        self._cu_cache.insert(i, cu)
+        if not self._no_cache:
+            self._cu_offsets_map.insert(i, offset)
+            self._cu_cache.insert(i, cu)
         return cu
 
     def _parse_CU_at_offset(self, offset):
@@ -491,7 +493,8 @@ class DWARFInfo(object):
                 dwarfinfo=self,
                 structs=cu_structs,
                 cu_offset=offset,
-                cu_die_offset=cu_die_offset)
+                cu_die_offset=cu_die_offset,
+                enable_caching=not self._no_cache)
 
     def _is_supported_version(self, version):
         """ DWARF version supported by this parser
@@ -580,4 +583,11 @@ class DWARFInfo(object):
             suplink = self.structs.Dwarf_debuglink.parse_stream(self.gnu_debuglink_sec.stream)
             return suplink.sup_filename
         return None
-
+    
+    def disable_caching(self):
+        self._no_cache = True
+        if len(self._cu_cache): # Clear the cache, if any
+            for cu in self._cu_cache:
+                cu.disable_caching() 
+            self._cu_cache = []
+            self._cu_offsets_map = []

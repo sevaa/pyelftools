@@ -134,7 +134,7 @@ class DIE(object):
         """
         if self._parent is None:
             self._search_ancestor_offspring()
-        return self._parent
+        return self._parent if isinstance(self._parent, DIE) else self.cu._get_cached_DIE(self._parent)
 
     def get_full_path(self):
         """ Return the full path filename for the DIE.
@@ -170,8 +170,9 @@ class DIE(object):
     # interesting to consumers
     #
 
-    def set_parent(self, die):
-        self._parent = die
+    def set_parent(self, parent):
+        # Parent can be a DIE object or an offset
+        self._parent = parent
 
     #------ PRIVATE ------#
 
@@ -194,7 +195,7 @@ class DIE(object):
         while search.offset < self.offset:
             prev = search
             for child in search.iter_children():
-                child.set_parent(search)
+                child.set_parent(search if self.cu.caching_enabled else search.offset)
                 if child.offset <= self.offset:
                     prev = child
 
